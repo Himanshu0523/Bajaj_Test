@@ -1,147 +1,196 @@
-import express from 'express'
-import cors from 'cors'
-import dotenv from 'dotenv'
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import mongoose from 'mongoose';
+import Ticket from './ticket.model.js';
 
 dotenv.config();
 
 const app = express();
-app.use(cors());
+
+// Enable CORS for local development and deployed frontend
+app.use(cors({
+  origin: true, // Allow all origins or specify React app dev origin in production
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  credentials: true
+}));
+
 app.use(express.json({ limit: '10mb' }));
 
+// MongoDB Connection
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/deskflow';
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('Connected to MongoDB successfully.'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
-const isPrime = (num) => {
-  if (num <= 1) return false;
-  for (let i = 2; i <= Math.sqrt(num); i++) {
-    if (num % i === 0) return false;
-  }
-  return true;
+// Transition validator helper
+const isValidTransition = (oldStatus, newStatus) => {
+  if (oldStatus === newStatus) return true;
+
+  const order = ['open', 'in_progress', 'resolved', 'closed'];
+  const oldIdx = order.indexOf(oldStatus);
+  const newIdx = order.indexOf(newStatus);
+
+  if (oldIdx === -1 || newIdx === -1) return false;
+
+  const diff = newIdx - oldIdx;
+  // Forward 1 step or backward 1 step is allowed
+  return diff === 1 || diff === -1;
 };
 
+// Health check endpoint
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+});
 
-
-const getMimeType = (buffer) => {
-  const hex = buffer.toString('hex', 0, 4).toUpperCase();
-  if (hex.startsWith('89504E47')) return 'image/png';
-  if (hex.startsWith('FFD8FF')) return 'image/jpeg';
-  if (hex.startsWith('25504446')) return 'application/pdf';
-  
-  return 'application/octet-stream';
-};
-
-/**
- * Validates and extracts metadata from a base64 encoded file string.
- */
-const processFile = (fileB64) => {
-  const defaultResult = {
-    file_valid: false,
-    file_mime_type: null,
-    file_size_kb: null
-  };
-
-  if (!fileB64 || typeof fileB64 !== 'string') {
-    return defaultResult;
-  }
-
-  try {
-    let base64String = fileB64;
-    let mimeType = null;
-
-    // Check and strip Data URI prefix if present
-    const dataUriMatch = fileB64.match(/^data:(.+);base64,(.+)$/);
-    if (dataUriMatch) {
-      mimeType = dataUriMatch[1];
-      base64String = dataUriMatch[2];
-    }
-
-    // Strict validation check for base64 structure
-    const base64Regex = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2,3})?$/;
-    if (!base64Regex.test(base64String)) {
-      return defaultResult;
-    }
-
-    const buffer = Buffer.from(base64String, 'base64');
-    if (buffer.length === 0) {
-      return defaultResult;
-    }
-
-    return {
-      file_valid: true,
-      file_mime_type: mimeType || getMimeType(buffer),
-      file_size_kb: parseFloat((buffer.length / 1024).toFixed(2))
-    };
-  } catch (error) {
-    return defaultResult;
-  }
-};
-
-/**
- * Processes input data array to separate alphabets/numbers and check for primes.
- */
-const processInputData = (data) => {
-  const numbers = [];
-  const alphabets = [];
-  let isPrimeFound = false;
-
-  if (!Array.isArray(data)) {
-    return { numbers, alphabets, isPrimeFound };
-  }
-
-  for (const item of data) {
-    const itemStr = String(item);
-
-    if (/^\d+$/.test(itemStr)) {
-      numbers.push(itemStr);
-      if (isPrime(parseInt(itemStr, 10))) {
-        isPrimeFound = true;
-      }
-    } else if (/^[a-zA-Z]$/.test(itemStr)) {
-      alphabets.push(itemStr);
-    }
-  }
-
-  return { numbers, alphabets, isPrimeFound };
-};
-
-/**
- * Finds the highest lowercase alphabet from the extracted alphabets.
- */
-const getHighestLowercaseAlphabet = (alphabets) => {
-  const lowercaseAlphabets = alphabets.filter(char => /^[a-z]$/.test(char));
-  if (lowercaseAlphabets.length === 0) {
-    return [];
-  }
-
-  lowercaseAlphabets.sort();
-  return [lowercaseAlphabets[lowercaseAlphabets.length - 1]];
-};
-
-// GET Route: returns fixed operations code
+// GET /bfhl for backward compatibility or direct health testing
 app.get('/bfhl', (req, res) => {
   res.status(200).json({ operation_code: 1 });
 });
 
-// POST Route: processes user request body
-app.post('/bfhl', (req, res) => {
+// POST /tickets - Create a ticket
+app.post('/tickets', async (req, res) => {
   try {
-    const { data = [], file_b64 } = req.body;
+    const { subject, description, customerEmail, priority } = req.body;
+    
+    // Create new ticket instance to trigger validations
+    const ticket = new Ticket({
+      subject,
+      description,
+      customerEmail,
+      priority
+    });
 
-    const { numbers, alphabets, isPrimeFound } = processInputData(data);
-    const highestLowercaseAlphabet = getHighestLowercaseAlphabet(alphabets);
-    const fileResult = processFile(file_b64);
+    await ticket.save();
+    res.status(201).json(ticket);
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(val => val.message);
+      return res.status(400).json({ message: messages.join(', ') });
+    }
+    res.status(500).json({ message: 'Internal server error while creating ticket.' });
+  }
+});
+
+// GET /tickets - List tickets with combinable filters
+app.get('/tickets', async (req, res) => {
+  try {
+    const { status, priority, breached } = req.query;
+    const filterQuery = {};
+
+    if (status) {
+      filterQuery.status = status;
+    }
+    if (priority) {
+      filterQuery.priority = priority;
+    }
+
+    let tickets = await Ticket.find(filterQuery).sort({ createdAt: -1 });
+
+    // Handle derived SLA breach filter in memory
+    if (breached !== undefined) {
+      const isBreached = breached === 'true';
+      tickets = tickets.filter(t => t.slaBreached === isBreached);
+    }
+
+    res.status(200).json(tickets);
+  } catch (error) {
+    res.status(500).json({ message: 'Internal server error while fetching tickets.' });
+  }
+});
+
+// GET /tickets/stats - Aggregated stats
+app.get('/tickets/stats', async (req, res) => {
+  try {
+    const tickets = await Ticket.find({});
+    
+    const statusCounts = { open: 0, in_progress: 0, resolved: 0, closed: 0 };
+    const priorityCounts = { low: 0, medium: 0, high: 0, urgent: 0 };
+    let slaBreachedOpenCount = 0;
+
+    tickets.forEach(ticket => {
+      if (statusCounts[ticket.status] !== undefined) {
+        statusCounts[ticket.status]++;
+      }
+      if (priorityCounts[ticket.priority] !== undefined) {
+        priorityCounts[ticket.priority]++;
+      }
+      // Count SLA-breached tickets that are currently open
+      if (ticket.slaBreached && (ticket.status === 'open' || ticket.status === 'in_progress')) {
+        slaBreachedOpenCount++;
+      }
+    });
 
     res.status(200).json({
-      is_success: true,
-      user_id: "himanshu_satpute_0827AL231056",
-      email: "himanshusatpute231233@acropolis.in",
-      roll_number: "0827AL231056",
-      numbers,
-      alphabets,
-      highest_lowercase_alphabet: highestLowercaseAlphabet,
-      is_prime_found: isPrimeFound,
-      ...fileResult
+      statusCounts,
+      priorityCounts,
+      slaBreachedOpenCount
     });
   } catch (error) {
-    res.status(500).json({ is_success: false, message: "Internal server error" });
+    res.status(500).json({ message: 'Internal server error while compiling stats.' });
+  }
+});
+
+// PATCH /tickets/:id - Update ticket (status transitions rules)
+app.patch('/tickets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, subject, description, priority, customerEmail } = req.body;
+
+    const ticket = await Ticket.findById(id);
+    if (!ticket) {
+      return res.status(404).json({ message: 'Ticket not found.' });
+    }
+
+    // Enforce status transitions rules if status is changing
+    if (status && status !== ticket.status) {
+      if (!isValidTransition(ticket.status, status)) {
+        return res.status(400).json({
+          message: `Invalid status transition from '${ticket.status}' to '${status}'. Only adjacent step transitions are allowed.`
+        });
+      }
+
+      // Automatically handle resolvedAt
+      if (status === 'resolved') {
+        ticket.resolvedAt = new Date();
+      } else if (ticket.status === 'resolved') {
+        // Moving back from resolved must clear resolvedAt
+        ticket.resolvedAt = null;
+      }
+      
+      ticket.status = status;
+    }
+
+    // Update other fields if provided
+    if (subject !== undefined) ticket.subject = subject;
+    if (description !== undefined) ticket.description = description;
+    if (priority !== undefined) ticket.priority = priority;
+    if (customerEmail !== undefined) ticket.customerEmail = customerEmail;
+
+    await ticket.save();
+    res.status(200).json(ticket);
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(val => val.message);
+      return res.status(400).json({ message: messages.join(', ') });
+    }
+    res.status(500).json({ message: 'Internal server error while updating ticket.' });
+  }
+});
+
+// DELETE /tickets/:id - Delete a ticket
+app.delete('/tickets/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deletedTicket = await Ticket.findByIdAndDelete(id);
+    
+    if (!deletedTicket) {
+      return res.status(404).json({ message: 'Ticket not found.' });
+    }
+    
+    res.status(200).json({ message: 'Ticket deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Internal server error while deleting ticket.' });
   }
 });
 

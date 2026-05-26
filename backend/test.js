@@ -1,83 +1,103 @@
-const http = require('http');
+const BASE_URL = 'http://localhost:3000';
 
-const makeRequest = (method, path, body = null) => {
-  return new Promise((resolve, reject) => {
-    const postData = body ? JSON.stringify(body) : '';
-    const options = {
-      hostname: 'localhost',
-      port: 3000,
-      path: path,
-      method: method,
-      headers: {}
-    };
+async function testBackend() {
+  console.log('=== DeskFlow Backend Verification Tests ===');
 
-    if (body) {
-      options.headers['Content-Type'] = 'application/json';
-      options.headers['Content-Length'] = Buffer.byteLength(postData);
-    }
-
-    const req = http.request(options, res => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          resolve({ statusCode: res.statusCode, data: JSON.parse(data) });
-        } catch (e) {
-          resolve({ statusCode: res.statusCode, data: data });
-        }
-      });
-    });
-
-    req.on('error', err => reject(err));
-    if (body) {
-      req.write(postData);
-    }
-    req.end();
-  });
-};
-
-async function runTests() {
   try {
-    console.log('--- Running GET /bfhl ---');
-    const getRes = await makeRequest('GET', '/bfhl');
-    console.log('GET Status:', getRes.statusCode);
-    console.log('GET Response:', getRes.data);
+    // 1. Health check
+    const healthRes = await fetch(`${BASE_URL}/healthz`);
+    console.log(`[Health] Status: ${healthRes.status} -> ${await healthRes.text()}`);
 
-    console.log('\n--- Running POST /bfhl with empty file_b64 ---');
-    const postRes1 = await makeRequest('POST', '/bfhl', {
-      data: ["M", "1", "334", "4", "B", "Z", "a", "7"],
-      file_b64: ""
+    // 2. Validate email error
+    console.log('\n[Create] Testing validation (invalid email):');
+    const invalidEmailRes = await fetch(`${BASE_URL}/tickets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: 'Validation test',
+        description: 'Testing email format',
+        customerEmail: 'not-an-email',
+        priority: 'high'
+      })
     });
-    console.log('POST Status:', postRes1.statusCode);
-    console.log('POST Response:', postRes1.data);
+    console.log(`Status: ${invalidEmailRes.status}`);
+    console.log(`Response:`, await invalidEmailRes.json());
 
-    console.log('\n--- Running POST /bfhl with invalid file_b64 ---');
-    const postRes2 = await makeRequest('POST', '/bfhl', {
-      data: ["M", "1", "334", "4", "B", "Z", "a", "7"],
-      file_b64: "invalid_b64_string_with_symbols!!!"
+    // 3. Create valid ticket
+    console.log('\n[Create] Creating a valid urgent ticket:');
+    const ticketRes = await fetch(`${BASE_URL}/tickets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: 'Database connection drop',
+        description: 'Production db is unreachable',
+        customerEmail: 'admin@company.com',
+        priority: 'urgent'
+      })
     });
-    console.log('POST Status:', postRes2.statusCode);
-    console.log('POST Response:', postRes2.data);
+    console.log(`Status: ${ticketRes.status}`);
+    const ticket = await ticketRes.json();
+    console.log(`Created Ticket:`, ticket);
+    const ticketId = ticket.id || ticket._id;
 
-    console.log('\n--- Running POST /bfhl with valid file_b64 (no data URI) ---');
-    const postRes3 = await makeRequest('POST', '/bfhl', {
-      data: ["2", "4", "5", "92"],
-      file_b64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    // 4. Test status transition rules
+    console.log('\n[Transition] Testing invalid transition (open -> resolved):');
+    const invalidTransRes = await fetch(`${BASE_URL}/tickets/${ticketId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'resolved' })
     });
-    console.log('POST Status:', postRes3.statusCode);
-    console.log('POST Response:', postRes3.data);
+    console.log(`Status: ${invalidTransRes.status}`);
+    console.log(`Response:`, await invalidTransRes.json());
 
-    console.log('\n--- Running POST /bfhl with valid file_b64 (with data URI) ---');
-    const postRes4 = await makeRequest('POST', '/bfhl', {
-      data: ["A", "C", "Z", "c", "i"],
-      file_b64: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    console.log('\n[Transition] Testing valid transition (open -> in_progress):');
+    const validTransRes = await fetch(`${BASE_URL}/tickets/${ticketId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'in_progress' })
     });
-    console.log('POST Status:', postRes4.statusCode);
-    console.log('POST Response:', postRes4.data);
+    console.log(`Status: ${validTransRes.status}`);
+    const updatedTicket = await validTransRes.json();
+    console.log(`Updated Ticket:`, updatedTicket);
 
-  } catch (err) {
-    console.error('Error running tests:', err.message);
+    console.log('\n[Transition] Testing valid transition (in_progress -> resolved):');
+    const resolvedTransRes = await fetch(`${BASE_URL}/tickets/${ticketId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'resolved' })
+    });
+    console.log(`Status: ${resolvedTransRes.status}`);
+    const resolvedTicket = await resolvedTransRes.json();
+    console.log(`Resolved Ticket (check resolvedAt):`, resolvedTicket);
+
+    console.log('\n[Transition] Testing backward transition (resolved -> in_progress):');
+    const backTransRes = await fetch(`${BASE_URL}/tickets/${ticketId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'in_progress' })
+    });
+    console.log(`Status: ${backTransRes.status}`);
+    const backTicket = await backTransRes.json();
+    console.log(`Moved Back Ticket (resolvedAt should be null):`, backTicket);
+
+    // 5. Query stats
+    console.log('\n[Stats] Querying stats:');
+    const statsRes = await fetch(`${BASE_URL}/tickets/stats`);
+    console.log(`Status: ${statsRes.status}`);
+    console.log(`Stats Response:`, await statsRes.json());
+
+    // 6. Delete ticket
+    console.log('\n[Delete] Deleting ticket:');
+    const deleteRes = await fetch(`${BASE_URL}/tickets/${ticketId}`, {
+      method: 'DELETE'
+    });
+    console.log(`Status: ${deleteRes.status}`);
+    console.log(`Response:`, await deleteRes.json());
+
+    console.log('\n=== All Tests Completed ===');
+  } catch (error) {
+    console.error('Test run encountered an error:', error);
   }
 }
 
-runTests();
+testBackend();
