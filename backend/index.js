@@ -18,7 +18,11 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 
 // MongoDB Connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/deskflow';
+const MONGODB_URI = process.env.MONGODB_URI || (
+  (process.env.NETLIFY || process.env.NODE_ENV === 'production')
+    ? 'mongodb+srv://himanshusatpute7_db_user:VbaYVERxxb1h14wQ@cluster0.zejjlik.mongodb.net/deskflow?retryWrites=true&w=majority'
+    : 'mongodb://127.0.0.1:27017/deskflow'
+);
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB successfully.'))
   .catch(err => console.error('MongoDB connection error:', err));
