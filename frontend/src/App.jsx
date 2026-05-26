@@ -3,7 +3,14 @@ import axios from 'axios';
 
 // Get backend URL with fallback and safety cleaning
 const getBackendUrl = () => {
-  let url = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3000';
+  let url = import.meta.env.VITE_BACKEND_URL;
+  if (!url) {
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+      url = 'http://localhost:3000';
+    } else {
+      url = '/api';
+    }
+  }
   url = url.replace(/\/bfhl$/, '');
   return url.replace(/\/$/, '');
 };
